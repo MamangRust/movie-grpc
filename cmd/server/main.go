@@ -19,8 +19,6 @@ import (
 	"github.com/renaldyhidayatt/movie_grpc/service"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/sdk/resource"
-	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
 	"google.golang.org/grpc"
 
 	"gorm.io/driver/sqlite"
@@ -34,16 +32,13 @@ func init() {
 var DB *gorm.DB
 var err error
 
-var serviceName = semconv.ServiceNameKey.String("test-service")
-
 func DatabaseConnection() {
-	dbPath := "movie_grpc.db" // Path file SQLite
+	dbPath := "movie_grpc.db"
 	DB, err = gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
 	if err != nil {
 		log.Fatal("Error connecting to the database...", err)
 	}
 
-	// Migrasi model ke database SQLite
 	if err := DB.AutoMigrate(&models.Movie{}); err != nil {
 		log.Fatalf("Error during migration: %v", err)
 	}
@@ -56,31 +51,17 @@ func main() {
 	ctx := context.Background()
 	flag.Parse()
 
-	// Listener untuk gRPC
 	grpcLis, err := net.Listen("tcp", ":50051")
 	if err != nil {
 		log.Fatalf("Failed to listen for gRPC: %v", err)
 	}
 
-	// Listener untuk metrics
 	metricsLis, err := net.Listen("tcp", ":8080")
 	if err != nil {
 		log.Fatalf("Failed to listen for metrics: %v", err)
 	}
 
-	conn, err := config.InitConn()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	res, err := resource.New(ctx,
-		resource.WithAttributes(serviceName),
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	shutdownTracerProvider, err := config.InitTracerProvider(ctx, res, conn)
+	shutdownTracerProvider, err := config.InitTracerProvider(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -94,25 +75,23 @@ func main() {
 	movieRepo := repository.NewMovieRepository(DB)
 	movieService := service.NewMovieService(movieRepo, tracer)
 
-	// Create the gRPC server
 	grpcServer := grpc.NewServer(
 		grpc.StatsHandler(
-			otelgrpc.NewServerHandler(),
+			otelgrpc.NewServerHandler(
+				otelgrpc.WithTracerProvider(otel.GetTracerProvider()),
+				otelgrpc.WithPropagators(otel.GetTextMapPropagator()),
+			),
 		),
 	)
 
-	// Create metrics server
 	metricsServer := http.NewServeMux()
 	metricsServer.Handle("/metrics", promhttp.Handler())
 
-	// Register the movie service with the gRPC server
 	pb.RegisterMovieServiceServer(grpcServer, movieService)
 
-	// Use WaitGroup to ensure both servers run
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// Start metrics server
 	go func() {
 		defer wg.Done()
 		log.Println("Metrics server listening on :8080")
@@ -121,7 +100,6 @@ func main() {
 		}
 	}()
 
-	// Start gRPC server
 	go func() {
 		defer wg.Done()
 		log.Println("gRPC server listening on :50051")
@@ -130,6 +108,5 @@ func main() {
 		}
 	}()
 
-	// Wait for both servers to finish
 	wg.Wait()
 }

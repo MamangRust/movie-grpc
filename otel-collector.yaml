@@ -2,34 +2,63 @@ receivers:
   otlp:
     protocols:
       grpc:
+        endpoint: "0.0.0.0:4317"
       http:
+        endpoint: "0.0.0.0:4318"
 
-exporters:
-  logging:
-    verbosity: detailed
   jaeger:
-    endpoint: jaeger:14250
-    tls:
-      insecure: true
+    protocols:
+      grpc:
+        endpoint: "0.0.0.0:14250"       # default bila tidak dispesifikasi :contentReference[oaicite:3]{index=3}
+      thrift_binary:
+        endpoint: "0.0.0.0:6832"        # default bila tidak dispesifikasi :contentReference[oaicite:4]{index=4}
+      thrift_compact:
+        endpoint: "0.0.0.0:6831"        # default bila tidak dispesifikasi :contentReference[oaicite:5]{index=5}
+      thrift_http:
+        endpoint: "0.0.0.0:14268"       # default bila tidak dispesifikasi :contentReference[oaicite:6]{index=6}
+
   prometheus:
-    endpoint: 0.0.0.0:9090
-    const_labels:
-      label1: value1
+    config:
+      scrape_configs:
+        - job_name: "otel-collector"
+          scrape_interval: 5s
+          static_configs:
+            - targets: ["localhost:8888"]
+        - job_name: "movie-service"
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["server:8080"]
+              labels:
+                application: "movie-grpc-service"
 
 processors:
   batch:
 
+exporters:
+  otlp:
+    endpoint: "otelcol:4317"
+  prometheus:
+    endpoint: "0.0.0.0:8889"           # expose Collector metrics untuk Prometheus :contentReference[oaicite:7]{index=7}
+
+extensions:
+  health_check:
+  pprof:
+  zpages:
+
 service:
+  extensions: [health_check, pprof, zpages]
   pipelines:
     traces:
-      receivers: [otlp]
+      receivers: [otlp, jaeger]
       processors: [batch]
-      exporters: [logging, jaeger]
+      exporters: [otlp]
+
     metrics:
-      receivers: [otlp]
+      receivers: [otlp, prometheus]
       processors: [batch]
-      exporters: [logging, prometheus]
+      exporters: [otlp, prometheus]   # sertakan Prometheus exporter
+
     logs:
       receivers: [otlp]
       processors: [batch]
-      exporters: [logging]
+      exporters: [otlp]

@@ -4,6 +4,7 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 	pb "github.com/renaldyhidayatt/movie_grpc/proto"
@@ -36,17 +37,40 @@ func main() {
 	r := gin.Default()
 
 	r.GET("/movies", func(ctx *gin.Context) {
-		res, err := client.GetMovies(ctx, &pb.ReadMoviesRequest{})
+		page, err := strconv.Atoi(ctx.DefaultQuery("page", "1"))
+		if err != nil || page < 1 {
+			page = 1
+		}
+
+		pageSize, err := strconv.Atoi(ctx.DefaultQuery("page_size", "10"))
+		if err != nil || pageSize < 1 {
+			pageSize = 10
+		}
+
+		search := ctx.Query("search")
+
+		req := &pb.ReadMoviesRequest{
+			Page:     int32(page),
+			PageSize: int32(pageSize),
+			Search:   search,
+		}
+
+		res, err := client.GetMovies(ctx, req)
 		if err != nil {
-			ctx.JSON(http.StatusBadRequest, gin.H{
-				"error": err,
+			ctx.JSON(http.StatusInternalServerError, gin.H{
+				"error": err.Error(),
 			})
 			return
 		}
+
 		ctx.JSON(http.StatusOK, gin.H{
-			"movies": res.Movies,
+			"movies":       res.Movies,
+			"totalRecords": res.TotalRecords,
+			"page":         page,
+			"pageSize":     pageSize,
 		})
 	})
+
 	r.GET("/movies/:id", func(ctx *gin.Context) {
 		id := ctx.Param("id")
 		res, err := client.GetMovie(ctx, &pb.ReadMovieRequest{Id: id})

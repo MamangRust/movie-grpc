@@ -10,11 +10,15 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/redis/go-redis/v9"
 	"github.com/renaldyhidayatt/movie_grpc/config"
+	"github.com/renaldyhidayatt/movie_grpc/logger"
 	"github.com/renaldyhidayatt/movie_grpc/models"
 	pb "github.com/renaldyhidayatt/movie_grpc/proto"
+	mencache "github.com/renaldyhidayatt/movie_grpc/redis"
 	"github.com/renaldyhidayatt/movie_grpc/repository"
 	"github.com/renaldyhidayatt/movie_grpc/service"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -72,8 +76,22 @@ func main() {
 	}()
 
 	tracer := otel.Tracer("hello")
+	logger, err := logger.NewLogger()
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:     "redis:6379",
+		Password: "",
+		DB:       0,
+	})
+
+	mencache := mencache.NewMovieServiceCache(redisClient, 10*time.Minute)
+
 	movieRepo := repository.NewMovieRepository(DB)
-	movieService := service.NewMovieService(movieRepo, tracer)
+	movieService := service.NewMovieService(movieRepo, tracer, logger, mencache)
 
 	grpcServer := grpc.NewServer(
 		grpc.StatsHandler(

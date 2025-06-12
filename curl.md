@@ -1,7 +1,7 @@
 ## Get Movies
 
 ```sh
-curl -X GET http://172.24.0.7:5000/movies
+curl -X GET http://localhost:5000/movies
 ```
 
 ## Get Movie
@@ -13,7 +13,7 @@ curl -X GET http://172.24.0.7:5000/movies/1
 ## Create Movie
 
 ```sh
-curl -X POST http://172.24.0.7:5000/movies \
+curl -X POST http://localhost:5000/movies \
 -H "Content-Type: application/json" \
 -d '{
   "title": "Inception",

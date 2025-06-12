@@ -3,8 +3,11 @@ package repository
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
+	"github.com/renaldyhidayatt/movie_grpc/dto"
 	"github.com/renaldyhidayatt/movie_grpc/models"
 	pb "github.com/renaldyhidayatt/movie_grpc/proto"
 	"gorm.io/gorm"
@@ -13,7 +16,7 @@ import (
 type MovieRepository interface {
 	CreateMovie(ctx context.Context, movie *pb.Movie) error
 	GetMovie(ctx context.Context, id string) (*pb.Movie, error)
-	GetMovies(ctx context.Context) ([]*pb.Movie, error)
+	GetMovies(ctx context.Context, page, pageSize int, search string) (*dto.MovieListResult, error)
 	UpdateMovie(ctx context.Context, movie *pb.Movie) (*pb.Movie, error)
 	DeleteMovie(ctx context.Context, id string) error
 }
@@ -57,14 +60,38 @@ func (r *movieRepository) GetMovie(ctx context.Context, id string) (*pb.Movie, e
 	}, nil
 }
 
-func (r *movieRepository) GetMovies(ctx context.Context) ([]*pb.Movie, error) {
-	var movies []*models.Movie
-	res := r.db.Find(&movies)
-	if res.RowsAffected == 0 {
+func (r *movieRepository) GetMovies(ctx context.Context, page, pageSize int, search string) (*dto.MovieListResult, error) {
+	var (
+		movies       []*models.Movie
+		totalRecords int64
+	)
+
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 10
+	}
+
+	offset := (page - 1) * pageSize
+	query := r.db.WithContext(ctx).Model(&models.Movie{})
+
+	if search != "" {
+		searchPattern := "%" + strings.ToLower(search) + "%"
+		query = query.Where("LOWER(title) LIKE ? OR LOWER(genre) LIKE ?", searchPattern, searchPattern)
+	}
+
+	if err := query.Count(&totalRecords).Error; err != nil {
+		return nil, fmt.Errorf("failed to count movies: %w", err)
+	}
+
+	if err := query.Limit(pageSize).Offset(offset).Find(&movies).Error; err != nil {
+		return nil, fmt.Errorf("failed to fetch movies: %w", err)
+	}
+	if len(movies) == 0 {
 		return nil, errors.New("movies not found")
 	}
 
-	// Convert []*Movie to []*pb.Movie
 	pbMovies := make([]*pb.Movie, len(movies))
 	for i, m := range movies {
 		pbMovies[i] = &pb.Movie{
@@ -74,7 +101,10 @@ func (r *movieRepository) GetMovies(ctx context.Context) ([]*pb.Movie, error) {
 		}
 	}
 
-	return pbMovies, nil
+	return &dto.MovieListResult{
+		Movies:       pbMovies,
+		TotalRecords: totalRecords,
+	}, nil
 }
 
 func (r *movieRepository) UpdateMovie(ctx context.Context, movie *pb.Movie) (*pb.Movie, error) {

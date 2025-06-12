@@ -36,7 +36,9 @@ processors:
 
 exporters:
   otlp:
-    endpoint: "otelcol:4317"
+    endpoint: "jaeger:4317"  
+    tls:
+      insecure: true
   prometheus:
     endpoint: "0.0.0.0:8889"           # expose Collector metrics untuk Prometheus :contentReference[oaicite:7]{index=7}
 
@@ -47,16 +49,17 @@ extensions:
 
 service:
   extensions: [health_check, pprof, zpages]
+
   pipelines:
     traces:
-      receivers: [otlp, jaeger]
+      receivers: [otlp]
       processors: [batch]
       exporters: [otlp]
 
     metrics:
       receivers: [otlp, prometheus]
       processors: [batch]
-      exporters: [otlp, prometheus]   # sertakan Prometheus exporter
+      exporters: [prometheus]
 
     logs:
       receivers: [otlp]

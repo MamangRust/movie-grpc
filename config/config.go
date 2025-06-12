@@ -26,7 +26,6 @@ func InitConn() (*grpc.ClientConn, error) {
 	return conn, err
 }
 
-// Initializes an OTLP exporter, and configures the corresponding trace provider.
 func InitTracerProvider(ctx context.Context) (func(context.Context) error, error) {
 	traceExporter, err := otlptracegrpc.New(
 		ctx,

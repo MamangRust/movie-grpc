@@ -28,15 +28,19 @@ message ReadMovieResponse{
     Movie movie =1;
 }
 
-message ReadMoviesRequest{
-
+message ReadMoviesRequest {
+  int32 page = 1;
+  int32 page_size = 2;
+  string search = 3;
 }
 
-message ReadMoviesResponse{
-    repeated Movie movies =1;
+message ReadMoviesResponse {
+  repeated Movie movies = 1;
+  int64 total_records = 2;
 }
 
- message UpdateMovieRequest{
+
+message UpdateMovieRequest{
     Movie movie =1;
 }
 

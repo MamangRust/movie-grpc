@@ -2,29 +2,40 @@ package service
 
 import (
 	"context"
-	"log"
-	"net/http"
+	"fmt"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/renaldyhidayatt/movie_grpc/logger"
 	pb "github.com/renaldyhidayatt/movie_grpc/proto"
+	mencache "github.com/renaldyhidayatt/movie_grpc/redis"
 	"github.com/renaldyhidayatt/movie_grpc/repository"
-
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
+	otelcodes "go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
+
+func generateMovieListKey(page, pageSize int, search string) string {
+	if search == "" {
+		search = "_"
+	}
+	return fmt.Sprintf("movie:list:page=%d:size=%d:search=%s", page, pageSize, search)
+}
 
 type MovieService struct {
 	trace           trace.Tracer
+	logger          logger.LoggerInterface
+	mencache        mencache.MovieServiceCache
 	repo            repository.MovieRepository
 	requestCounter  *prometheus.CounterVec
 	requestDuration *prometheus.HistogramVec
 	pb.UnimplementedMovieServiceServer
 }
 
-func NewMovieService(repo repository.MovieRepository, trace trace.Tracer) *MovieService {
-	// Register Prometheus metrics
+func NewMovieService(repo repository.MovieRepository, trace trace.Tracer, logger logger.LoggerInterface, mencache mencache.MovieServiceCache) *MovieService {
 	requestCounter := prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "movie_service_requests_total",
@@ -42,18 +53,18 @@ func NewMovieService(repo repository.MovieRepository, trace trace.Tracer) *Movie
 		[]string{"method"},
 	)
 
-	// Register metrics with Prometheus
 	prometheus.MustRegister(requestCounter, requestDuration)
 
 	return &MovieService{
 		repo:            repo,
 		trace:           trace,
+		logger:          logger,
+		mencache:        mencache,
 		requestCounter:  requestCounter,
 		requestDuration: requestDuration,
 	}
 }
 
-// Helper to observe metrics
 func (s *MovieService) recordMetrics(method string, status string, startTime time.Time) {
 	duration := time.Since(startTime).Seconds()
 	s.requestCounter.WithLabelValues(method, status).Inc()
@@ -61,29 +72,19 @@ func (s *MovieService) recordMetrics(method string, status string, startTime tim
 }
 
 func (s *MovieService) CreateMovie(ctx context.Context, req *pb.CreateMovieRequest) (*pb.CreateMovieResponse, error) {
-	startTime := time.Now()
-	method := "CreateMovie"
-
-	ctx, span := s.trace.Start(ctx, method)
-	defer span.End()
-
-	log.Println("Create Movie")
-	span.SetAttributes(attribute.String("method", method))
-	span.SetAttributes(attribute.String("movie_title", req.GetMovie().Title))
+	var err error
+	ctx, end := s.startTracingAndLogging(
+		ctx,
+		"CreateMovie",
+		attribute.String("movie.title", req.GetMovie().Title),
+	)
+	defer func() { end(err) }()
 
 	movie := req.GetMovie()
-	err := s.repo.CreateMovie(ctx, movie)
+	err = s.repo.CreateMovie(ctx, movie)
 	if err != nil {
-		span.RecordError(err)
-		span.SetAttributes(attribute.Int("http.status_code", http.StatusInternalServerError))
-		span.SetStatus(codes.Error, "Failed to create movie")
-		s.recordMetrics(method, "error", startTime)
 		return nil, err
 	}
-
-	span.SetAttributes(attribute.Int("http.status_code", http.StatusOK))
-	span.SetStatus(codes.Ok, "Movie created successfully")
-	s.recordMetrics(method, "success", startTime)
 
 	return &pb.CreateMovieResponse{
 		Movie: movie,
@@ -91,28 +92,18 @@ func (s *MovieService) CreateMovie(ctx context.Context, req *pb.CreateMovieReque
 }
 
 func (s *MovieService) GetMovie(ctx context.Context, req *pb.ReadMovieRequest) (*pb.ReadMovieResponse, error) {
-	startTime := time.Now()
-	method := "GetMovie"
-
-	ctx, span := s.trace.Start(ctx, method)
-	defer span.End()
-
-	log.Println("Read Movie", req.GetId())
-	span.SetAttributes(attribute.String("method", method))
-	span.SetAttributes(attribute.String("movie_id", req.GetId()))
+	var err error
+	ctx, end := s.startTracingAndLogging(
+		ctx,
+		"GetMovie",
+		attribute.String("movie.id", req.GetId()),
+	)
+	defer func() { end(err) }()
 
 	movie, err := s.repo.GetMovie(ctx, req.GetId())
 	if err != nil {
-		span.RecordError(err)
-		span.SetAttributes(attribute.Int("http.status_code", http.StatusNotFound))
-		span.SetStatus(codes.Error, "Movie not found")
-		s.recordMetrics(method, "error", startTime)
 		return nil, err
 	}
-
-	span.SetAttributes(attribute.Int("http.status_code", http.StatusOK))
-	span.SetStatus(codes.Ok, "Movie fetched successfully")
-	s.recordMetrics(method, "success", startTime)
 
 	return &pb.ReadMovieResponse{
 		Movie: movie,
@@ -120,57 +111,62 @@ func (s *MovieService) GetMovie(ctx context.Context, req *pb.ReadMovieRequest) (
 }
 
 func (s *MovieService) GetMovies(ctx context.Context, req *pb.ReadMoviesRequest) (*pb.ReadMoviesResponse, error) {
-	startTime := time.Now()
-	method := "GetMovies"
+	var err error
+	ctx, end := s.startTracingAndLogging(
+		ctx,
+		"GetMovies",
+	)
+	defer func() { end(err) }()
 
-	ctx, span := s.trace.Start(ctx, method)
-	defer span.End()
+	page := int(req.GetPage())
+	if page < 1 {
+		page = 1
+	}
+	pageSize := int(req.GetPageSize())
+	if pageSize < 1 {
+		pageSize = 10
+	}
+	search := req.GetSearch()
+	cacheKey := generateMovieListKey(page, pageSize, search)
 
-	log.Println("Read Movies")
-	span.SetAttributes(attribute.String("method", method))
-
-	movies, err := s.repo.GetMovies(ctx)
+	result, err := s.mencache.GetMovieList(ctx, cacheKey)
 	if err != nil {
-		span.RecordError(err)
-		span.SetAttributes(attribute.Int("http.status_code", http.StatusInternalServerError))
-		span.SetStatus(codes.Error, "Failed to fetch movies")
-		s.recordMetrics(method, "error", startTime)
-		return nil, err
+		return nil, status.Errorf(codes.Internal, "failed to get movie list from cache: %v", err)
+	}
+	if result != nil {
+		return &pb.ReadMoviesResponse{
+			Movies:       result.Movies,
+			TotalRecords: result.TotalRecords,
+		}, nil
 	}
 
-	span.SetAttributes(attribute.Int("http.status_code", http.StatusOK))
-	span.SetStatus(codes.Ok, "Movies fetched successfully")
-	s.recordMetrics(method, "success", startTime)
+	result, err = s.repo.GetMovies(ctx, page, pageSize, search)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to fetch movies: %v", err)
+	}
+
+	_ = s.mencache.SetMovieList(ctx, cacheKey, result)
 
 	return &pb.ReadMoviesResponse{
-		Movies: movies,
+		Movies:       result.Movies,
+		TotalRecords: result.TotalRecords,
 	}, nil
 }
 
 func (s *MovieService) UpdateMovie(ctx context.Context, req *pb.UpdateMovieRequest) (*pb.UpdateMovieResponse, error) {
-	startTime := time.Now()
-	method := "UpdateMovie"
-
-	ctx, span := s.trace.Start(ctx, method)
-	defer span.End()
-
-	log.Println("Update Movie")
-	span.SetAttributes(attribute.String("method", method))
-	span.SetAttributes(attribute.String("movie_id", req.GetMovie().Id))
+	var err error
+	ctx, end := s.startTracingAndLogging(
+		ctx,
+		"UpdateMovie",
+		attribute.String("movie.id", req.GetMovie().Id),
+	)
+	defer func() { end(err) }()
 
 	movie := req.GetMovie()
 	updatedMovie, err := s.repo.UpdateMovie(ctx, movie)
 	if err != nil {
-		span.RecordError(err)
-		span.SetAttributes(attribute.Int("http.status_code", http.StatusInternalServerError))
-		span.SetStatus(codes.Error, "Failed to update movie")
-		s.recordMetrics(method, "error", startTime)
 		return nil, err
 	}
-
-	span.SetAttributes(attribute.Int("http.status_code", http.StatusOK))
-	span.SetStatus(codes.Ok, "Movie updated successfully")
-	s.recordMetrics(method, "success", startTime)
 
 	return &pb.UpdateMovieResponse{
 		Movie: updatedMovie,
@@ -178,30 +174,62 @@ func (s *MovieService) UpdateMovie(ctx context.Context, req *pb.UpdateMovieReque
 }
 
 func (s *MovieService) DeleteMovie(ctx context.Context, req *pb.DeleteMovieRequest) (*pb.DeleteMovieResponse, error) {
-	startTime := time.Now()
-	method := "DeleteMovie"
+	var err error
+	ctx, end := s.startTracingAndLogging(
+		ctx,
+		"DeleteMovie",
+		attribute.String("movie.id", req.GetId()),
+	)
+	defer func() { end(err) }()
 
-	ctx, span := s.trace.Start(ctx, method)
-	defer span.End()
-
-	log.Println("Delete Movie")
-	span.SetAttributes(attribute.String("method", method))
-	span.SetAttributes(attribute.String("movie_id", req.GetId()))
-
-	err := s.repo.DeleteMovie(ctx, req.GetId())
+	err = s.repo.DeleteMovie(ctx, req.GetId())
 	if err != nil {
-		span.RecordError(err)
-		span.SetAttributes(attribute.Int("http.status_code", http.StatusInternalServerError))
-		span.SetStatus(codes.Error, "Failed to delete movie")
-		s.recordMetrics(method, "error", startTime)
 		return nil, err
 	}
-
-	span.SetAttributes(attribute.Int("http.status_code", http.StatusOK))
-	span.SetStatus(codes.Ok, "Movie deleted successfully")
-	s.recordMetrics(method, "success", startTime)
 
 	return &pb.DeleteMovieResponse{
 		Success: true,
 	}, nil
+}
+
+func (s *MovieService) startTracingAndLogging(
+	ctx context.Context,
+	method string,
+	attrs ...attribute.KeyValue,
+) (context.Context, func(error)) {
+	start := time.Now()
+	ctx, span := s.trace.Start(ctx, method)
+
+	if len(attrs) > 0 {
+		span.SetAttributes(attrs...)
+	}
+	span.AddEvent("Start: " + method)
+
+	s.logger.Debug("Start: " + method)
+
+	end := func(err error) {
+		duration := time.Since(start)
+
+		span.SetAttributes(attribute.Float64("execution_duration_ms", float64(duration.Milliseconds())))
+
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(otelcodes.Error, err.Error())
+			s.logger.Error("Error in "+method,
+				zap.Error(err),
+				zap.Duration("duration", duration),
+			)
+			s.recordMetrics(method, "error", start)
+		} else {
+			span.SetStatus(otelcodes.Ok, "success")
+			s.logger.Info("Success: "+method,
+				zap.Duration("duration", duration),
+			)
+			s.recordMetrics(method, "success", start)
+		}
+
+		span.End()
+	}
+
+	return ctx, end
 }
